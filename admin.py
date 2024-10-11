@@ -17,12 +17,17 @@ base_coin = settings_data['base_coin']
 pair = settings_data['pair']
 admin_binance_api_key = settings_data['admin_binance_api_key']
 admin_binance_api_secret = settings_data['admin_binance_api_secret']
+if 'last_update_time' in settings_data:
+    last_update_time = settings_data['last_update_time']
+else:
+    last_update_time = None
 
-if ip == "":
+# if last update time is more than 1 hour, update the IP address
+if last_update_time is None or datetime.now() - last_update_time > timedelta(hours=1):
     response = requests.get('https://ipinfo.io')
     data = response.json()
     ip = data['ip']
-    settings.update_one({"id": 1}, {"$set": {"ip": ip}})
+    settings.update_one({"id": 1}, {"$set": {"ip": ip, "last_update_time": datetime.now()}})
 
 # Initialize the Binance client
 client = Client(admin_binance_api_key, admin_binance_api_secret)
@@ -34,7 +39,27 @@ lot_size = [f for f in exchange_info['filters'] if f['filterType'] == 'LOT_SIZE'
 min_qty = float(lot_size['minQty'])
 max_qty = float(lot_size['maxQty'])
 step_size = float(lot_size['stepSize'])
-settings.update_one({"id": 1}, {"$set": {"min_qty": min_qty, "max_qty": max_qty, "step_size": step_size}})
+# get the min notional value
+# Fetch and store LOT_SIZE filter information if available
+# Initialize min_notional
+min_notional = None
+
+# Check for LOT_SIZE filter
+lot_size_filter = [f for f in exchange_info['filters'] if f['filterType'] == 'LOT_SIZE']
+price_filter = [f for f in exchange_info['filters'] if f['filterType'] == 'PRICE_FILTER']
+
+if lot_size_filter and price_filter:
+    min_qty = float(lot_size_filter[0]['minQty'])
+    min_price = float(price_filter[0]['minPrice'])
+    # Approximate min_notional by multiplying min_qty and min_price
+    min_notional = min_qty * min_price
+else:
+    print(f"MIN_NOTIONAL filter is not available for this symbol {pair}.")
+    exit()
+
+
+    
+settings.update_one({"id": 1}, {"$set": {"min_qty": min_qty, "max_qty": max_qty, "step_size": step_size, "min_notional": min_notional}})
 
 # Function to handle incoming WebSocket messages
 def handle_socket_message(msg):

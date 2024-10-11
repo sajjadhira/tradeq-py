@@ -35,7 +35,9 @@ while True:
     users = database["users"]
     
     # find pending admin new trades
-    find_trade = trades.find_one({"role": "admin", "result": "pending", "status": "NEW"})
+    # find_trade = trades.find_one({"role": "admin", "result": "pending", "status": "NEW"}, sort=[("created_at", -1)])
+    # find last trade by admin
+    find_trade = trades.find_one({"role": "admin", "result": "pending", "status": "NEW"}, sort=[("created_at", -1)])
     if find_trade is not None:
         admin_trade_id = find_trade['admin_trade_id']
         percent = float(find_trade['percent'])
@@ -48,27 +50,44 @@ while True:
 
         for user in all_users:
             
-            user_status = int(user['status'])
+            if 'status' not in user:
+                status = 0
+                users.update_one({"id": user['id']}, {"$set": {"status": status}})
+            else:
+                user_status = int(user['status'])
+                
             if user_status == 0:
                 continue
             
             find_existing_trade = trades.find_one({"admin_trade_id": admin_trade_id, "user_id": user['id']})
             if find_existing_trade is None:
                 # do binance trade
-                api_key = user["binance_api_key"]
-                api_secret = user["binance_api_secret"]
-                user_fuel = float(user['fuel'])
+                if 'binance_api_key' in user:
+                    api_key = user["binance_api_key"]
+                else:
+                    api_key = ""
+                    
+                if 'binance_api_secret' in user:
+                    api_secret = user["binance_api_secret"]
+                else:
+                    api_secret = ""
+                
+                if 'fuel' in user:
+                    user_fuel = float(user['fuel'])
+                else:
+                    user_fuel = 0
+                    
                 if api_key == "" or api_secret == "":
                     # set user message
-                    trace = traceback.print_exc()
-                    message = f"Binance API key and secret not found. Trace: {trace}"
+                    # trace = traceback.print_exc()
+                    message = f"Binance API key and secret not found."
                     users.update_one({"id": user['id']}, {"$set": {"message": message, "status": 0}})
                     continue
                 
                 if user_fuel < 1:
                     # update user with a log
-                    trace = traceback.print_exc()
-                    message = f"Insufficient fuel, cant take trade, please reload fuel balance. Trace: {trace}"
+                    # trace = traceback.print_exc()
+                    message = f"Insufficient fuel, cant take trade, please reload fuel balance."
                     users.update_one({"id": user['id']}, {"$set": {"message": message}})
                     continue
                 
@@ -76,6 +95,14 @@ while True:
                     client = Client(api_key, api_secret)
                     
                     if find_trade['side'] == "BUY":
+                    
+                        print(f"{find_trade['side']} trade for user {user['name']}")
+                    # check user last trade if last trade side is buy then ignore this trade
+                        last_trade = trades.find_one({"pair": find_trade['pair'], "user_id": user['id'], "side": "BUY", "result": "filled_confirmed"}, sort=[("created_at", -1)])
+                        if last_trade is not None:
+                            continue
+                        
+                        
                     # get user balance
                         user_balance = client.get_asset_balance(asset=base_coin)
                         # split balance
@@ -86,15 +113,45 @@ while True:
                         # quantity = "{:0.0{}f}".format(asset_quantity, price_precision)
                         quantity = max(min_qty, min(max_qty, (asset_quantity // step_size) * step_size))
                         quantity = round_step_size(quantity, step_size)
+
+                        if balance < 10:
+                            # trace = traceback.print_exc()
+                            print(f"User {user['name']} has insufficient balance to buy {quantity} {find_trade['pair']} current free {base_coin} balance {balance}")
+                            users.update_one({"id": user['id']}, {"$set": {"message": f"You have insufficient balance to buy {quantity} {find_trade['pair']}. Your current free {base_coin} balance is ${balance}", "status": 0}})
+                            continue
+                        
                     elif find_trade['side'] == "SELL":
+                        
+                        print(f"{find_trade['side']} trade for user {user['name']}")
+                        
+                        # check user last trade if last trade side is sell then ignore this trade
+                        last_trade = trades.find_one({"pair": find_trade['pair'], "user_id": user['id'], "side": "SELL", "result": "filled_confirmed"}, sort=[("created_at", -1)])
+                        if last_trade is not None:
+                            continue
                         last_buy_order_for_this_pair_and_user = trades.find_one({"pair": find_trade['pair'], "user_id": user['id'], "side": "BUY", "result": "filled_confirmed"}, sort=[("created_at", -1)])                        
                         if last_buy_order_for_this_pair_and_user is None:
-                            trace = traceback.print_exc()
-                            print(f"Last buy order not found for user {user['name']} Trace: {trace}")
-                            time.sleep(5)
+                            # trace = traceback.print_exc()
+                            print(f"Last buy order not found for user {user['name']}")
                             continue
                         quantity = float(last_buy_order_for_this_pair_and_user['quantity'])
                         quantity = round_step_size(quantity, step_size)
+                        
+                        # first check if user has enough quantity to sell
+                        user_balance_for_current_asset = client.get_asset_balance(asset=find_trade['pair'])
+                        available_asset_balance = float(user_balance_for_current_asset['free'])
+                        
+                        if quantity > available_asset_balance:
+                            # trace = traceback.print_exc()
+                            print(f"User {user['name']} has insufficient balance to sell {quantity} {find_trade['pair']}")
+                            users.update_one({"id": user['id']}, {"$set": {"message": f"You have sold {find_trade['pair']} manually and we cannot sell {quantity}, so your trade is marked as close from our end automatically."}})
+                            trades.update_one({"trade_id": last_buy_order_for_this_pair_and_user['trade_id']}, {"$set": {"status": "MANUALLY CLOSED","result": "filled_confirmed"}})
+                            continue
+                        
+                    else:
+                        continue
+
+ 
+                    
                     order = client.create_order(symbol=find_trade['pair'], side=find_trade['side'], type=find_trade['type'], quantity=quantity, price=find_trade['price'], timeInForce="GTC")
                     order_id = order['orderId']
                     order_status = order['status']
@@ -122,12 +179,12 @@ while True:
                     # update user balance
                     get_client_balance = client.get_asset_balance(asset=base_coin)
                     user_balance = float(get_client_balance['free'])
-                    users.update_one({"id": user['id']}, {"$set": {"balance": user_balance}})
+                    users.update_one({"id": user['id']}, {"$set": {"trading_balance": user_balance}})
                     
                 except Exception as e:
                     # update user with a log
-                    trace = traceback.print_exc()
-                    message = f"{str(e)} for user {user['name']} Trace: {trace}"
+                    # trace = traceback.print_exc()
+                    message = f"{str(e)} for user {user['name']}"
                     users.update_one({"id": user['id']}, {"$set": {"message": message}})
                     
                     if "API-key format invalid" in str(e):
@@ -136,6 +193,8 @@ while True:
                     print(message)
                     time.sleep(5)
                     continue
+                
+            time.sleep(5)
                 
     
     # find filled user trades by admin
@@ -149,11 +208,20 @@ while True:
         user_info = users.find_one({"id": filled_trade['user_id']})
         if user_info is None:
             continue
-        api_key = user_info['binance_api_key']
-        api_secret = user_info['binance_api_secret']
+        
+        if 'binance_api_key' not in user_info:
+            api_key = user_info['binance_api_key']
+        else:
+            api_key = ""
+            
+        if 'binance_api_secret' not in user_info:
+            api_secret = user_info['binance_api_secret']
+        else:
+            api_secret = ""
+            
         if api_key == "" or api_secret == "":
-            trace = traceback.print_exc()
-            message = f"Binance API key and secret not found Trace: {trace}"
+            # trace = traceback.print_exc()
+            message = f"Binance API key and secret not found"
             users.update_one({"id": user_info['id']}, {"$set": {"message": message, "status": 0}})
             print(message)
             continue
@@ -232,7 +300,7 @@ while True:
                     # update user fuel
                     get_client_balance = client.get_asset_balance(asset=base_coin)
                     user_balance = float(get_client_balance['free'])
-                    users.update_one({"id": user_info['id']}, {"$set": {"fuel": user_fuel, "balance": user_balance}})
+                    users.update_one({"id": user_info['id']}, {"$set": {"fuel": user_fuel, "trading_balance": user_balance}})
                 
                 trades.update_one({"trade_id": filled_trade['trade_id']}, {"$set": {"profit": profit, "fee": commission}})
             if 'profit' not in user_info:
@@ -247,8 +315,8 @@ while True:
         except Exception as e:
             # trades.update_one({"trade_id": filled_trade['trade_id']}, {"$set": {"result": "filled_confirmed"}})
             # update user with a log
-            trace = traceback.print_exc()
-            message = f"{str(e)} for user {user_info['name']} Trace: {trace}"
+            # trace = traceback.print_exc()
+            message = f"{str(e)} for user {user_info['name']}"
             users.update_one({"id": user_info['id']}, {"$set": {"message": message}})
             trades.update_one({"trade_id": filled_trade['trade_id']}, {"$set": {"message": message}})
             
@@ -276,8 +344,18 @@ while True:
         if user_info is None:
             print(f"User not found for trade {tarde_id}")
             continue
-        api_key = user_info['binance_api_key']
-        api_secret = user_info['binance_api_secret']
+        
+        if 'binance_api_key' in user_info:
+            api_key = user_info['binance_api_key']
+        else:
+            api_key = ""
+            
+        if 'binance_api_secret' in user_info:
+            api_secret = user_info['binance_api_secret']
+        else:
+            api_secret = ""
+            
+            
         if api_key == "" or api_secret == "":
             message = "Binance API key and secret not found"
             users.update_one({"id": user_info['id']}, {"$set": {"message": message, "status": 0}})
@@ -289,19 +367,22 @@ while True:
             client.cancel_order(symbol=str(cancel_trade['pair']), orderId=int(cancel_trade["trade_id"]))
             get_client_balance = client.get_asset_balance(asset=base_coin)
             user_balance = float(get_client_balance['free'])
-            users.update_one({"id": user_info['id']}, {"$set": {"balance": user_balance}})
+            users.update_one({"id": user_info['id']}, {"$set": {"trading_balance": user_balance}})
             trades.update_one({"trade_id": tarde_id}, {"$set": {"result": "cancele_confirmed"}})
             print(f"Trade canceled {tarde_id} for user {user_info['name']}")
         except Exception as e:
             # update user with a log
             # trades.update_one({"trade_id": tarde_id}, {"$set": {"result": "cancele_confirmed"}})
-            trace = traceback.print_exc()
-            message = f"{str(e)} for user {user_info['name']} Trace: {trace}"
+            # trace = traceback.print_exc()
+            message = f"{str(e)} for user {user_info['name']}"
             users.update_one({"id": user_info['id']}, {"$set": {"message": message}})
             trades.update_one({"trade_id": tarde_id}, {"$set": {"message": message}})
             
             if "API-key format invalid" in str(e):
                 users.update_one({"id": user_info['id']}, {"$set": {"status": 0}})
+                
+            if "Unknown order sent" in str(e):
+                trades.update_one({"trade_id": tarde_id}, {"$set": {"result": "cancele_confirmed"}})
                 
             print(message)
             time.sleep(5)
