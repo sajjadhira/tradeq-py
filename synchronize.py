@@ -245,7 +245,7 @@ while True:
                 if profit > 0:
                     # deduct 25% of profit as commission and update user fuel
                     user_fuel = float(user_info['fuel'])
-                    commission = profit * 0.25
+                    commission = profit * default_affiliate_commission / 100
                     user_fuel -= commission
                     
                     # distribution of commission
