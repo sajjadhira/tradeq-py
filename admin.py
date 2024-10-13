@@ -53,6 +53,7 @@ if lot_size_filter and price_filter:
     min_price = float(price_filter[0]['minPrice'])
     # Approximate min_notional by multiplying min_qty and min_price
     min_notional = min_qty * min_price
+    # print(f"Calculated min_notional for {pair} using LOT_SIZE and PRICE_FILTER: {min_notional}")
 else:
     print(f"MIN_NOTIONAL filter is not available for this symbol {pair}.")
     exit()
