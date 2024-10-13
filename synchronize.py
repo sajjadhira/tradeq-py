@@ -24,6 +24,7 @@ admin_affiliate_commission = float(settings_data['admin_affiliate_commission'])
 developer_revenue_percent = float(settings_data['developer_revenue_percent'])
 superadmin_revenue_percent = float(settings_data['superadmin_revenue_percent'])
 superadmin_revenue_percent = float(settings_data['superadmin_revenue_percent'])
+default_fee = float(settings_data['default_fee'])
 
 
 min_qty = float(settings_data['min_qty'])
@@ -100,7 +101,7 @@ while True:
                         
                             print(f"{find_trade['side']} trade for user {user['name']}")
                         # check user last trade if last trade side is buy then ignore this trade
-                            last_trade = trades.find_one({"pair": find_trade['pair'], "user_id": user['id'], "side": "BUY", "result": "filled_confirmed"}, sort=[("created_at", -1)])
+                            last_trade = trades.find_one({"pair": find_trade['pair'], "user_id": user['id'], "side": "BUY"}, sort=[("created_at", -1)])
                             if last_trade is not None:
                                 continue
                             
@@ -127,7 +128,7 @@ while True:
                             print(f"{find_trade['side']} trade for user {user['name']}")
                             
                             # check user last trade if last trade side is sell then ignore this trade
-                            last_trade = trades.find_one({"pair": find_trade['pair'], "user_id": user['id'], "side": "SELL", "result": "filled_confirmed"}, sort=[("created_at", -1)])
+                            last_trade = trades.find_one({"pair": find_trade['pair'], "user_id": user['id'], "side": "SELL"}, sort=[("created_at", -1)])
                             if last_trade is not None:
                                 continue
                             last_buy_order_for_this_pair_and_user = trades.find_one({"pair": find_trade['pair'], "user_id": user['id'], "side": "BUY", "result": "filled_confirmed"}, sort=[("created_at", -1)])                        
@@ -241,45 +242,87 @@ while True:
                     last_buy_price = float(last_buy_order_for_this_pair_and_user['price'])
                     last_sell_price = float(filled_trade['price'])
                     last_sell_quantity = float(filled_trade['quantity'])
-                    commission = 0
                     profit = (last_sell_price - last_buy_price) * last_sell_quantity
+                    user_fuel = float(user_info['fuel'])
+                    
+                    system_commission = 0
+                    admin_commisison = 0
+                    affiliate_commission = 0
+                    developer_commisison = 0
+                    fee = 0
+                    admin_id = 0
+                    affiliate_id = 0
+                    
                     if profit > 0:
-                        # deduct 25% of profit as commission and update user fuel
-                        user_fuel = float(user_info['fuel'])
-                        commission = profit * default_affiliate_commission / 100
-                        user_fuel -= commission
-                        
+
                         # distribution of commission
                         
-                        
-                        # add commission to affiliated user
-                        if user_info["role"] == "user" and user_info["affiliated_by"] != "":
-                            affiliate_user = users.find_one({"id": user_info["affiliated_by"]})
-                            if affiliate_user is not None:
-                                affiliate_user_balance = float(affiliate_user['balance'])
-                                # now give the affiliate user default_affiliate_commission% of the commission
-                                default_affiliate_commission = commission * default_affiliate_commission / 100
-                                affiliate_user_balance += default_affiliate_commission
-                                users.update_one({"id": affiliate_user['id']}, {"$set": {"balance": affiliate_user_balance}})
-                                
-                                
+    
                         # add commission to admin
                         if user_info["role"] == "user" and user_info["admin_id"] != "":
                             admin_user = users.find_one({"id": user_info["admin_id"]})
                             if admin_user is not None:
+                                
+                                admin_id  = int(admin_user['id'])
+                                
+                                user_charge_from_admin = float(admin_user['commission_user'])
+                                admin_pay_to_system = float(admin_user['commission'])
+                                admin_pay_to_affiliate = float(admin_user['commission_affiliate'])
+                                
+                                # deduct of profit as commission and update user fuel
+                                user_fuel = float(user_info['fuel'])
+                                commission_from_profit = profit * user_charge_from_admin / 100
+                                user_fuel -= commission_from_profit
+                                fee = commission_from_profit
+                                
+                                # admin commission
+                                system_commission = commission_from_profit * admin_pay_to_system / 100
+                                admin_commisison = commission_from_profit - system_commission
+                                
+                                
+                        
                                 admin_user_balance = float(admin_user['balance'])
-                                # now give the affiliate user default_affiliate_commission% of the commission
-                                admin_affiliate_commission = commission * admin_affiliate_commission / 100
-                                admin_user_balance += admin_affiliate_commission
+                                admin_user_balance += admin_commisison
                                 users.update_one({"id": admin_user['id']}, {"$set": {"balance": admin_user_balance}})
+                                
+                                
+                                
+                                # add commission to affiliated user
+                                if user_info["role"] == "user" and user_info["affiliated_by"] != "":
+                                    affiliate_user = users.find_one({"id": user_info["affiliated_by"]})
+                                    if affiliate_user is not None:
+                                        affiliate_id = int(affiliate_user['id'])
+                                        affiliate_user_balance = float(affiliate_user['balance'])
+                                        # now give the affiliate user default_affiliate_commission% of the commission
+                                        affiliate_commission = commission_from_profit * admin_pay_to_affiliate / 100
+                                        affiliate_user_balance += affiliate_commission
+                                        users.update_one({"id": affiliate_user['id']}, {"$set": {"balance": affiliate_user_balance}})
+                        else:
+                            # add commission to affiliated user
+                            user_fuel = float(user_info['fuel'])
+                            commission_from_profit = profit * default_fee / 100
+                            user_fuel -= commission_from_profit
+                            fee = commission_from_profit
+                            
+                            # add commission to affiliated user
+                            if user_info["role"] == "user" and user_info["affiliated_by"] != "":
+                                affiliate_user = users.find_one({"id": user_info["affiliated_by"]})
+                                if affiliate_user is not None:
+                                    affiliate_id = int(affiliate_user['id'])
+                                    affiliate_user_balance = float(affiliate_user['balance'])
+                                    # now give the affiliate user default_affiliate_commission% of the commission
+                                    affiliate_commission = commission_from_profit * default_affiliate_commission / 100
+                                    system_commission = commission_from_profit - affiliate_commission
+                                    affiliate_user_balance += affiliate_commission
+                                    users.update_one({"id": affiliate_user['id']}, {"$set": {"balance": affiliate_user_balance}})
+                            
+                            
                                 
                         # add commission to superadmin
                         superadmin_user = users.find_one({"role": "superadmin"})
                         if superadmin_user is not None:
                             superadmin_user_balance = float(superadmin_user['balance'])
-                            # now give the affiliate user default_affiliate_commission% of the commission
-                            superadmin_revenue = commission * superadmin_revenue_percent / 100
-                            superadmin_user_balance += superadmin_revenue
+                            superadmin_user_balance += system_commission
                             users.update_one({"id": superadmin_user['id']}, {"$set": {"balance": superadmin_user_balance}})
                             
                         # add commission to developer
@@ -287,31 +330,19 @@ while True:
                         if developer_user is not None:
                             developer_user_balance = float(developer_user['balance'])
                             # now give the affiliate user default_affiliate_commission% of the commission
-                            developer_revenue = commission * developer_revenue_percent / 100
-                            developer_user_balance += developer_revenue
+                            developer_commisison = (profit/4) * developer_revenue_percent / 100
+                            developer_user_balance += developer_commisison
                             users.update_one({"id": developer_user['id']}, {"$set": {"balance": developer_user_balance}})
                             
-                            
-                            
                         # commission system done
-                            
-                            
-                            
                         
                         # update user fuel
                         get_client_balance = client.get_asset_balance(asset=base_coin)
                         user_balance = float(get_client_balance['free'])
                         users.update_one({"id": user_info['id']}, {"$set": {"fuel": user_fuel, "trading_balance": user_balance}})
                     
-                    trades.update_one({"trade_id": filled_trade['trade_id']}, {"$set": {"profit": profit, "fee": commission}})
-                if 'profit' not in user_info:
-                    previous_profit = 0
-                else:
-                    previous_profit = float(user_info['profit'])
-                if profit > 0:
-                    new_profit = previous_profit + profit
-                    users.update_one({"id": user_info['id']}, {"$set": {"profit": new_profit}})
-                    # print(f"Profit : ${profit} for user {user_info['name']}")
+                    trades.update_one({"trade_id": filled_trade['trade_id']}, {"$set": {"profit": profit, "fee": fee, "admin_commission": admin_commisison, "system_commission": system_commission, "developer_commission": developer_commisison, "affiliate_commission": affiliate_commission, "admin_id": admin_id, "affiliate_id": affiliate_id}})
+     
                 trades.update_one({"trade_id": filled_trade['trade_id']}, {"$set": {"result": "filled_confirmed"}})
             except Exception as e:
                 # trades.update_one({"trade_id": filled_trade['trade_id']}, {"$set": {"result": "filled_confirmed"}})
