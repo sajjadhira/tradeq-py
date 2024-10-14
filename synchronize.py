@@ -35,7 +35,6 @@ while True:
             sort=[("created_at", -1)]
         )
         if not find_trade:
-            time.sleep(5)
             continue
 
         admin_trade_id = find_trade['admin_trade_id']
