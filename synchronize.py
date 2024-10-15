@@ -101,7 +101,7 @@ while True:
                             if balance < 10:
                                 # trace = traceback.print_exc()
                                 print(f"User {user['name']} has insufficient balance to buy {quantity} {find_trade['pair']} current free {base_coin} balance {balance}")
-                                users.update_one({"id": user['id']}, {"$set": {"message": f"You have insufficient balance to buy {quantity} {find_trade['pair']}. Your current free {base_coin} balance is ${balance}", "status": 0}})
+                                users.update_one({"id": user['id']}, {"$set": {"message": f"You have insufficient balance to buy {quantity} {find_trade['pair']}. Your current free {base_coin} balance is ${balance}"}})
                                 continue
                             
                         elif find_trade['side'] == "SELL":
@@ -227,7 +227,7 @@ while True:
                 client = Client(api_key, api_secret)
                 # order = client.create_order(symbol=filled_trade['pair'], side=filled_trade['side'], type=filled_trade['type'], quantity=sale_quantity, price=filled_trade['price'], timeInForce="GTC")
                 
-                last_buy_order_for_this_pair_and_user = trades.find_one({"pair": filled_trade['pair'], "user_id": filled_trade['user_id'], "side": "BUY", "result": "filled_confirmed"})
+                last_buy_order_for_this_pair_and_user = trades.find_one({"pair": filled_trade['pair'], "user_id": filled_trade['user_id'], "side": "BUY", "result": "filled_confirmed"}, sort=[("created_at", -1)])
                 
                 if last_buy_order_for_this_pair_and_user is not None and filled_trade['side'] == "SELL":
 
