@@ -64,7 +64,7 @@ settings.update_one({"id": 1}, {"$set": {"min_qty": min_qty, "max_qty": max_qty,
 
 # Function to handle incoming WebSocket messages
 def handle_socket_message(msg):
-    date_time = datetime.now()
+    date_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     if msg['e'] == 'executionReport':
         trade_id = msg['i']
         status = msg['X']
@@ -76,7 +76,32 @@ def handle_socket_message(msg):
         trades = database["trades"]
         find_trade = trades.find_one({"trade_id": trade_id})
 
-        if status == "NEW" and type == "LIMIT" and find_trade is None:
+        # do stuff with the market order
+        if type == "MARKET" and find_trade is None:
+            balance = client.get_asset_balance(asset=base_coin)
+            amount_usd = float(price) * float(quantity)
+            amount_with_this_trade = float(balance['free']) + amount_usd
+            percent = (amount_usd * 100) / amount_with_this_trade
+
+            data = {
+                "trade_id": trade_id,
+                "admin_trade_id": trade_id,
+                "status": "NEW",
+                "pair": pair,
+                "price": price,
+                "quantity": quantity,
+                "percent": percent,
+                "role": "admin",
+                "side": side,
+                "type": type,
+                "result": "pending",
+                "user_id": 1,
+                "user_name": "Admin",
+                "created_at": date_time,
+            }
+            trades.insert_one(data)
+            print(f"{status} {type} {side}:  {trade_id} # {pair} {price}")
+        elif status == "NEW" and type == "LIMIT" and find_trade is None:
             balance = client.get_asset_balance(asset=base_coin)
             amount_usd = float(price) * float(quantity)
             amount_with_this_trade = float(balance['free']) + amount_usd

@@ -40,7 +40,191 @@ while True:
         # find pending admin new trades
         # find_trade = trades.find_one({"role": "admin", "result": "pending", "status": "NEW"}, sort=[("created_at", -1)])
         # find last trade by admin
-        find_trade = trades.find_one({"role": "admin", "result": "pending", "status": "NEW"}, sort=[("created_at", -1)])
+        
+        
+        ############################################
+        # DO FUNCTIONALITY FOR ADMIN MARKET TRADES #
+        ############################################
+        
+        find_market_trade = trades.find_one({"role": "admin", "result": "pending", "status": "NEW","type" : "MARKET"}, sort=[("created_at", -1)])
+        if find_market_trade is not None:
+            admin_trade_id = find_market_trade['admin_trade_id']
+            percent = float(find_market_trade['percent'])
+            admin_price = float(find_market_trade['price'])
+            
+            #  find active users and insert trade
+            # all_users = users.find({"role": "user", "status": 1})
+            # all users by role and status 1 or "1"
+            all_users = users.find({"role": "user", "status": {"$in": [1, "1"]}})
+            
+            for user in all_users:
+                
+                find_existing_trade = trades.find_one({"admin_trade_id": admin_trade_id, "user_id": user['id']})
+                if find_existing_trade is None:
+                        
+                    api_key = user.get("binance_api_key", "")
+                    api_secret = user.get("binance_api_secret", "")
+                    
+                    user_fuel = float(user.get("fuel", 0))
+                    sale_trade_id  = 0
+                        
+                    if api_key == "" or api_secret == "":
+                        # set user message
+                        # trace = traceback.print_exc()
+                        message = f"Binance API key and secret not found for {user['name']}. Trace: Line 86"
+                        users.update_one({"id": user['id']}, {"$set": {"message": message}})
+                        continue
+                    
+                    if user_fuel < 1:
+                        # update user with a log
+                        # trace = traceback.print_exc()
+                        message = f"Insufficient fuel, cant take trade, please reload fuel balance."
+                        users.update_one({"id": user['id']}, {"$set": {"message": message}})
+                        continue
+                    
+                    try:
+                        client = Client(api_key, api_secret)
+                        
+                        if find_market_trade['side'] == "BUY":
+                        
+                            print(f"{find_market_trade['side']} trade for user {user['name']}")
+                        # check user last trade if last trade side is buy then ignore this trade
+                            last_trade = trades.find_one({"pair": find_market_trade['pair'], "user_id": user['id'], "side": "BUY", "result": "pending"}, sort=[("created_at", -1)])
+                            if last_trade is not None:
+                                continue
+                            
+                            
+                        # get user balance
+                            user_balance = client.get_asset_balance(asset=base_coin)
+                            # split balance
+                            balance = float(user_balance['free'])
+                            # balance parcent
+                            percent_balance = balance * percent / 100
+                            asset_quantity = percent_balance / admin_price
+                            # quantity = "{:0.0{}f}".format(asset_quantity, price_precision)
+                            quantity = max(min_qty, min(max_qty, (asset_quantity // step_size) * step_size))
+                            quantity = round_step_size(quantity, step_size)
+
+                            if balance < 10:
+                                # trace = traceback.print_exc()
+                                print(f"User {user['name']} has insufficient balance to buy {quantity} {find_market_trade['pair']} current free {base_coin} balance {balance}")
+                                users.update_one({"id": user['id']}, {"$set": {"message": f"You have insufficient balance to buy {quantity} {find_market_trade['pair']}. Your current free {base_coin} balance is ${balance}"}})
+                                continue
+                            
+                        elif find_market_trade['side'] == "SELL":
+                            
+                            print(f"{find_market_trade['side']} trade for user {user['name']}")
+                            
+                            # check user last trade if last trade side is sell then ignore this trade
+                            last_trade = trades.find_one({"pair": find_market_trade['pair'], "user_id": user['id'], "side": "SELL", "result": "pending"}, sort=[("created_at", -1)])
+                            if last_trade is not None:
+                                continue
+                            
+                            last_buy_order_for_this_pair_and_user = trades.find_one({"pair": find_market_trade['pair'], "user_id": user['id'], "side": "BUY", "result": "filled_confirmed"}, sort=[("created_at", -1)])                        
+                            if last_buy_order_for_this_pair_and_user is None:
+                                # trace = traceback.print_exc()
+                                print(f"Last buy order not found for user {user['name']}")
+                                continue
+                            
+                            if 'sold' not in last_buy_order_for_this_pair_and_user:
+                                # trace = traceback.print_exc()
+                                print(f"Sold record not found for user {user['name']}")
+                                continue
+                            
+                            if last_buy_order_for_this_pair_and_user['sold'] == 1:
+                                # trace = traceback.print_exc()
+                                print(f"Last buy order already sold for user {user['name']}")
+                                continue
+                            
+                            quantity = float(last_buy_order_for_this_pair_and_user['quantity'])
+                            quantity = round_step_size(quantity, step_size)
+                            
+                            # first check if user has enough quantity to sell
+                            onlyasset = find_market_trade['pair'].replace(base_coin, "")
+                            user_balance_for_current_asset = client.get_asset_balance(asset=onlyasset)
+                            available_asset_balance = float(user_balance_for_current_asset['free'])
+                            
+                            if quantity > available_asset_balance:
+                                # trace = traceback.print_exc()
+                                print(f"User {user['name']} has insufficient balance to sell {quantity} {find_market_trade['pair']}")
+                                users.update_one({"id": user['id']}, {"$set": {"message": f"You have sold {find_market_trade['pair']} manually and we cannot sell {quantity}, so your trade is marked as close from our end automatically."}})
+                                trades.update_one({"trade_id": last_buy_order_for_this_pair_and_user['trade_id']}, {"$set": {"status": "MANUALLY CLOSED","result": "filled_confirmed"}})
+                                continue
+                            
+                        else:
+                            continue
+                        
+                        order = client.create_order(symbol=find_market_trade['pair'], side=find_market_trade['side'], type=find_market_trade['type'], quantity=quantity)
+                        order_id = order['orderId']
+                        order_status = order['status']
+                        # asset_quantity = 115
+                        
+                        if 'admin_id' in user and user['admin_id'] > 0:
+                            admin_id = user['admin_id']
+                        else:
+                            admin_id = 0
+                            
+                        if 'affiliate_id' in user and user['affiliate_id'] > 0:
+                            affiliate_id = user['affiliate_id']
+                        else:
+                            affiliate_id = 0
+                            
+                            
+                        # add created_at to order with Y-m-=d H:i:s format
+                        created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        
+                        data = {
+                            "trade_id": order_id,
+                            "admin_trade_id": admin_trade_id,
+                            "status": order_status,
+                            "pair": find_market_trade['pair'],
+                            "price": find_market_trade['price'],
+                            "quantity": quantity,
+                            "role": "user",
+                            "side": find_market_trade['side'],
+                            "type": find_market_trade['type'],
+                            "result" : "pending",
+                            "user_id": user['id'],
+                            "user_name": user['name'],
+                            "admin_id" : admin_id,
+                            "affiliated_by" : affiliate_id,
+                            "profit": 0,
+                            "fee": 0,
+                            "sold" : 0,
+                            "created_at": created_at,
+                            "updated_at": created_at
+                        }
+                        
+                        trades.insert_one(data)
+                        print(f"Trade opened {order_id} for user {user['name']}")
+                        # update user balance
+                        get_client_balance = client.get_asset_balance(asset=base_coin)
+                        user_balance = float(get_client_balance['free'])
+                        users.update_one({"id": user['id']}, {"$set": {"trading_balance": user_balance}})
+                        
+                    except Exception as e:
+                        # update user with a log
+                        trace = traceback.print_exc()
+                        print(trace)
+                        message = f"{str(e)} for user {user['name']}"
+                        users.update_one({"id": user['id']}, {"$set": {"message": message}})
+                        
+                        if "API-key format invalid" in str(e):
+                            users.update_one({"id": user['id']}, {"$set": {"status": 0}})
+                            
+                        print(trace)
+                        continue
+            # update admin trade status to FILLED
+            trades.update_one({"admin_trade_id": admin_trade_id}, {"$set": {"result": "filled", "status": "FILLED"}})
+            
+        
+        
+        
+        ############################################
+        # DO FUNCTIONALITY FOR ADMIN LIMIT TRADES  #
+        ############################################
+        
+        find_trade = trades.find_one({"role": "admin", "result": "pending", "status": "NEW","type" : "LIMIT"}, sort=[("created_at", -1)])
         if find_trade is not None:
             admin_trade_id = find_trade['admin_trade_id']
             percent = float(find_trade['percent'])
@@ -60,6 +244,7 @@ while True:
                     api_secret = user.get("binance_api_secret", "")
                     
                     user_fuel = float(user.get("fuel", 0))
+                    sale_trade_id  = 0
                         
                     if api_key == "" or api_secret == "":
                         # set user message
@@ -119,6 +304,16 @@ while True:
                                 print(f"Last buy order not found for user {user['name']}")
                                 continue
                             
+                            if 'sold' not in last_buy_order_for_this_pair_and_user:
+                                # trace = traceback.print_exc()
+                                print(f"Sold record not found for user {user['name']}")
+                                continue
+                            
+                            if last_buy_order_for_this_pair_and_user['sold'] == 1:
+                                # trace = traceback.print_exc()
+                                print(f"Last buy order already sold for user {user['name']}")
+                                continue
+                            
                             
                             quantity = float(last_buy_order_for_this_pair_and_user['quantity'])
                             quantity = round_step_size(quantity, step_size)
@@ -156,28 +351,39 @@ while True:
                         else:
                             affiliate_id = 0
                         
+                        # add created_at to order with Y-m-=d H:i:s format
+                        created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        
+                        if find_trade['side'] == "SELL":
+                            result = "filled"
+                            status = "FILLED"
+                        elif find_trade['side'] == "BUY":
+                            result = "filled_confirmed"
+                            status = "FILLED"
                         
                         data = {
                             "trade_id": order_id,
                             "admin_trade_id": admin_trade_id,
-                            "status": order_status,
+                            "status": status,
                             "pair": find_trade['pair'],
                             "price": find_trade['price'],
                             "quantity": quantity,
                             "role": "user",
                             "side": find_trade['side'],
                             "type": find_trade['type'],
-                            "result" : "pending",
+                            "result" : result,
                             "user_id": user['id'],
                             "user_name": user['name'],
                             "admin_id" : admin_id,
                             "affiliated_by" : affiliate_id,
                             "profit": 0,
                             "fee": 0,
-                            "created_at": datetime.now()
+                            "sold" : 0,
+                            "created_at": created_at,
+                            "updated_at": created_at
                         }
                         trades.insert_one(data)
-                        print(f"Trade opened {order_id} for user {user['name']}")
+                        print(f"{find_trade['type']} {find_trade['side']} Trade opened {order_id} for user {user['name']}")
                         # update user balance
                         get_client_balance = client.get_asset_balance(asset=base_coin)
                         user_balance = float(get_client_balance['free'])
@@ -227,7 +433,7 @@ while True:
                 client = Client(api_key, api_secret)
                 # order = client.create_order(symbol=filled_trade['pair'], side=filled_trade['side'], type=filled_trade['type'], quantity=sale_quantity, price=filled_trade['price'], timeInForce="GTC")
                 
-                last_buy_order_for_this_pair_and_user = trades.find_one({"pair": filled_trade['pair'], "user_id": filled_trade['user_id'], "side": "BUY", "result": "filled_confirmed"}, sort=[("created_at", -1)])
+                last_buy_order_for_this_pair_and_user = trades.find_one({"pair": filled_trade['pair'], "user_id": filled_trade['user_id'], "side": "BUY", "result": "filled_confirmed","type" : filled_trade['type']}, sort=[("created_at", -1)])
                 
                 if last_buy_order_for_this_pair_and_user is not None and filled_trade['side'] == "SELL":
 
@@ -337,8 +543,11 @@ while True:
                         user_old_profit = float(user_info.get("profit", 0))
                         user_total_profit = user_old_profit + profit
                         users.update_one({"id": user_info['id']}, {"$set": {"fuel": user_fuel, "trading_balance": user_balance, "profit": user_total_profit}})
+                    updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     
-                    trades.update_one({"trade_id": filled_trade['trade_id']}, {"$set": {"profit": profit, "fee": fee, "admin_commission": admin_commisison, "system_commission": system_commission, "developer_commission": developer_commisison, "affiliate_commission": affiliate_commission, "admin_id": admin_id, "affiliate_id": affiliate_id}})
+                    trades.update_one({"trade_id": filled_trade['trade_id']}, {"$set": {"profit": profit, "fee": fee, "admin_commission": admin_commisison, "system_commission": system_commission, "developer_commission": developer_commisison, "affiliate_commission": affiliate_commission, "admin_id": admin_id, "affiliate_id": affiliate_id,"updated_at": updated_at}})
+                    
+                    trades.update_one({"trade_id": last_buy_order_for_this_pair_and_user['trade_id']}, {"$set": {"sold": 1,"updated_at": updated_at}})
      
                 trades.update_one({"trade_id": filled_trade['trade_id']}, {"$set": {"result": "filled_confirmed"}})
             except Exception as e:
