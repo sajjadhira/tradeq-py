@@ -41,6 +41,186 @@ while True:
         # find_trade = trades.find_one({"role": "admin", "result": "pending", "status": "NEW"}, sort=[("created_at", -1)])
         # find last trade by admin
         
+        ############################################
+        # DO FUNCTIONALITY FOR ADMIN OCO TRADES    #
+        ############################################
+        
+        find_oco_trade = trades.find_one({"role": "admin", "result": "pending", "status": "NEW","type" : "OCO"}, sort=[("created_at", -1)])
+        if find_oco_trade is not None:
+            admin_trade_id = find_oco_trade['admin_trade_id']
+            percent = float(find_oco_trade['percent'])
+            admin_price = float(find_oco_trade['price'])
+            stop_price = float(find_oco_trade['stop_price'])
+            
+            #  find active users and insert trade
+            # all_users = users.find({"role": "user", "status": 1})
+            # all users by role and status 1 or "1"
+            all_users = users.find({"role": "user", "status": {"$in": [1, "1"]}})
+            
+            for user in all_users:
+                
+                find_existing_trade = trades.find_one({"admin_trade_id": admin_trade_id, "user_id": user['id']})
+                if find_existing_trade is None:
+                        
+                    api_key = user.get("binance_api_key", "")
+                    api_secret = user.get("binance_api_secret", "")
+                    
+                    user_fuel = float(user.get("fuel", 0))
+                    sale_trade_id  = 0
+                        
+                    if api_key == "" or api_secret == "":
+                        # set user message
+                        # trace = traceback.print_exc()
+                        message = f"Binance API key and secret not found for {user['name']}. Trace: Line 86"
+                        users.update_one({"id": user['id']}, {"$set": {"message": message}})
+                        continue
+                    
+                    if user_fuel < 1:
+                        # update user with a log
+                        # trace = traceback.print_exc()
+                        message = f"Insufficient fuel, cant take trade, please reload fuel balance."
+                        users.update_one({"id": user['id']}, {"$set": {"message": message}})
+                        continue
+                    
+                    try:
+                        client = Client(api_key, api_secret)
+                        
+                        if find_oco_trade['side'] == "BUY":
+                        
+                            print(f"{find_oco_trade['side']} trade for user {user['name']}")
+                        # check user last trade if last trade side is buy then ignore this trade
+                            last_trade = trades.find_one({"pair": find_oco_trade['pair'], "user_id": user['id'], "side": "BUY", "result": "pending"}, sort=[("created_at", -1)])
+                            if last_trade is not None:
+                                continue
+                            
+                            
+                        # get user balance
+                            user_balance = client.get_asset_balance(asset=base_coin)
+                            # split balance
+                            balance = float(user_balance['free'])
+                            # balance parcent
+                            percent_balance = balance * percent / 100
+                            asset_quantity = percent_balance / admin_price
+                            # quantity = "{:0.0{}f}".format(asset_quantity, price_precision)
+                            quantity = max(min_qty, min(max_qty, (asset_quantity // step_size) * step_size))
+                            quantity = round_step_size(quantity, step_size)
+
+                            if balance < 10:
+                                # trace = traceback.print_exc()
+                                print(f"User {user['name']} has insufficient balance to buy {quantity} {find_oco_trade['pair']} current free {base_coin} balance {balance}")
+                                users.update_one({"id": user['id']}, {"$set": {"message": f"You have insufficient balance to buy {quantity} {find_oco_trade['pair']}. Your current free {base_coin} balance is ${balance}"}})
+                                continue
+                            
+                        elif find_oco_trade['side'] == "SELL":
+                            
+                            print(f"{find_oco_trade['side']} trade for user {user['name']}")
+                            
+                            # check user last trade if last trade side is sell then ignore this trade
+                            last_trade = trades.find_one({"pair": find_oco_trade['pair'], "user_id": user['id'], "side": "SELL", "result": "pending"}, sort=[("created_at", -1)])
+                            if last_trade is not None:
+                                continue
+                            
+                            last_buy_order_for_this_pair_and_user = trades.find_one({"pair": find_oco_trade['pair'], "user_id": user['id'], "side": "BUY", "result": "filled_confirmed"}, sort=[("created_at", -1)])
+                            if last_buy_order_for_this_pair_and_user is None:
+                                # trace = traceback.print_exc()
+                                print(f"Last buy order not found for user {user['name']}")
+                                continue
+                            
+                            if 'sold' not in last_buy_order_for_this_pair_and_user:
+                                # trace = traceback.print_exc()
+                                print(f"Sold record not found for user {user['name']}")
+                                continue
+                            
+                            if last_buy_order_for_this_pair_and_user['sold'] == 1:
+                                # trace = traceback.print_exc()
+                                print(f"Last buy order already sold for user {user['name']}")
+                                continue
+                            
+                            quantity = float(last_buy_order_for_this_pair_and_user['quantity'])
+                            quantity = round_step_size(quantity, step_size)
+                            
+                            # first check if user has enough quantity to sell
+                            onlyasset = find_oco_trade['pair'].replace(base_coin, "")
+                            user_balance_for_current_asset = client.get_asset_balance(asset=onlyasset)
+                            available_asset_balance = float(user_balance_for_current_asset['free'])
+                            
+                            if quantity > available_asset_balance:
+                                # trace = traceback.print_exc()
+                                print(f"User {user['name']} has insufficient balance to sell {quantity} {find_oco_trade['pair']}")
+                                users.update_one({"id": user['id']}, {"$set": {"message": f"You have sold {find_oco_trade['pair']} manually and we cannot sell {quantity}, so your trade is marked as close from our end automatically."}})
+                                trades.update_one({"trade_id": last_buy_order_for_this_pair_and_user['trade_id']}, {"$set": {"status": "MANUALLY CLOSED","result": "filled_confirmed"}})
+                                continue
+                            
+                        else:
+                            
+                            continue
+                        
+                        order = client.create_oco_order(symbol=find_oco_trade['pair'], side=find_oco_trade['side'], quantity=quantity, price=find_oco_trade['price'], stopPrice=stop_price, stopLimitPrice=stop_price, stopLimitTimeInForce="GTC")
+                        order_id = order['orderListId']
+                        order_status = order['listStatusType']
+                        # asset_quantity = 115
+                        
+                        if 'admin_id' in user and user['admin_id'] > 0:
+                            admin_id = user['admin_id']
+                        else:
+                            admin_id = 0
+                            
+                        if 'affiliate_id' in user and user['affiliate_id'] > 0:
+                            affiliate_id = user['affiliate_id']
+                        else:
+                            affiliate_id = 0
+                            
+                        # add created_at to order with Y-m-=d H:i:s format
+                        
+                        created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        
+                        data = {
+                            "trade_id": order_id,
+                            "admin_trade_id": admin_trade_id,
+                            "status": order_status,
+                            "pair": find_oco_trade['pair'],
+                            "price": find_oco_trade['price'],
+                            "quantity": quantity,
+                            "role": "user",
+                            "side": find_oco_trade['side'],
+                            "type": find_oco_trade['type'],
+                            "result" : "pending",
+                            "user_id": user['id'],
+                            "user_name": user['name'],
+                            "admin_id" : admin_id,
+                            "affiliated_by" : affiliate_id,
+                            "profit": 0,
+                            "fee": 0,
+                            "sold" : 0,
+                            "created_at": created_at,
+                            "updated_at": created_at
+                        }
+                        
+                        trades.insert_one(data)
+                        print(f"Trade opened {order_id} for user {user['name']}")
+                        # update user balance
+                        get_client_balance = client.get_asset_balance(asset=base_coin)
+                        user_balance = float(get_client_balance['free'])
+                        users.update_one({"id": user['id']}, {"$set": {"trading_balance": user_balance}})
+                        
+                    except Exception as e:
+                        # update user with a log
+                        trace = traceback.print_exc()
+                        print(trace)
+                        message = f"{str(e)} for user {user['name']}"
+                        users.update_one({"id": user['id']}, {"$set": {"message": message}})
+                        
+                        if "API-key format invalid" in str(e):
+                            users.update_one({"id": user['id']}, {"$set": {"status": 0}})
+                            
+                        print(trace)
+                        continue
+                    
+            # update admin trade status to FILLED
+            trades.update_one({"admin_trade_id": admin_trade_id}, {"$set": {"result": "filled", "status": "FILLED"}})
+            
+            
+        
         
         ############################################
         # DO FUNCTIONALITY FOR ADMIN MARKET TRADES #

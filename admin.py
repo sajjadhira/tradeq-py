@@ -76,8 +76,44 @@ def handle_socket_message(msg):
         trades = database["trades"]
         find_trade = trades.find_one({"trade_id": trade_id})
 
+        # do stuff with the OCO order
+        if type == "OCO" and find_trade is None:
+            
+            # Extract OCO-specific fields (assuming they are included in msg)
+            stop_price = msg.get('P')  # Stop price for the stop-limit leg
+            limit_price = msg.get('L')  # Limit price for the limit leg
+            stop_order_id = msg.get('C')  # ID of the stop-limit order
+            limit_order_id = msg.get('r')  # ID of the limit order
+            stop_price = float(stop_price) if stop_price else None
+            limit_price = float(limit_price) if limit_price else None
+            balance = client.get_asset_balance(asset=base_coin)
+            amount_usd = float(price) * float(quantity)
+            amount_with_this_trade = float(balance['free']) + amount_usd
+            percent = (amount_usd * 100) / amount_with_this_trade
+            
+            data = {
+                "trade_id": trade_id,
+                "admin_trade_id": trade_id,
+                "status": "NEW",
+                "pair": pair,
+                "price": price,
+                "quantity": quantity,
+                "percent": percent,
+                "role": "admin",
+                "side": side,
+                "type": type,
+                "result": "pending",
+                "stop_price": stop_price,
+                "limit_price": limit_price,
+                "stop_order_id": stop_order_id,
+                "limit_order_id": limit_order_id,
+                "user_id": 1,
+                "user_name": "Admin",
+                "created_at": date_time,
+            }
+            trades.insert_one(data)
         # do stuff with the market order
-        if type == "MARKET" and find_trade is None:
+        elif type == "MARKET" and find_trade is None:
             balance = client.get_asset_balance(asset=base_coin)
             amount_usd = float(price) * float(quantity)
             amount_with_this_trade = float(balance['free']) + amount_usd
