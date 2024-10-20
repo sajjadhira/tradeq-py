@@ -349,6 +349,14 @@ while True:
                         else:
                             affiliate_id = 0
                             
+                        
+                        if find_trade['side'] == "SELL":
+                            result = "filled"
+                            status = "FILLED"
+                        elif find_trade['side'] == "BUY":
+                            result = "filled_confirmed"
+                            status = "FILLED"
+                            
                             
                         # add created_at to order with Y-m-=d H:i:s format
                         created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -356,14 +364,14 @@ while True:
                         data = {
                             "trade_id": order_id,
                             "admin_trade_id": admin_trade_id,
-                            "status": order_status,
+                            "status": status,
                             "pair": find_market_trade['pair'],
                             "price": find_market_trade['price'],
                             "quantity": quantity,
                             "role": "user",
                             "side": find_market_trade['side'],
                             "type": find_market_trade['type'],
-                            "result" : "pending",
+                            "result" : result,
                             "user_id": user['id'],
                             "user_name": user['name'],
                             "admin_id" : admin_id,
@@ -533,25 +541,19 @@ while True:
                         
                         # add created_at to order with Y-m-=d H:i:s format
                         created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        
-                        if find_trade['side'] == "SELL":
-                            result = "filled"
-                            status = "FILLED"
-                        elif find_trade['side'] == "BUY":
-                            result = "filled_confirmed"
-                            status = "FILLED"
+
                         
                         data = {
                             "trade_id": order_id,
                             "admin_trade_id": admin_trade_id,
-                            "status": status,
+                            "status": order_status,
                             "pair": find_trade['pair'],
                             "price": find_trade['price'],
                             "quantity": quantity,
                             "role": "user",
                             "side": find_trade['side'],
                             "type": find_trade['type'],
-                            "result" : result,
+                            "result" : "pending",
                             "user_id": user['id'],
                             "user_name": user['name'],
                             "admin_id" : admin_id,
