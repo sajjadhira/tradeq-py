@@ -191,8 +191,6 @@ while True:
                             "user_name": user['name'],
                             "admin_limit_order_id": find_oco_trade['limit_order_id'],  # Store admin limit order ID
                             "admin_stop_order_id": find_oco_trade['stop_order_id'],  # Store admin stop order ID
-                            "stop_order_status": "NEW",
-                            "limit_order_status": "NEW",
                             "created_at": created_at,
                             "updated_at": created_at
                         }
@@ -778,15 +776,7 @@ while True:
             
             try:
                 client = Client(api_key, api_secret)
-                # if trade type is OCO then cancel OCO order
-                if cancel_trade_info['type'] == "OCO":
-                    admin_stop_order_id = cancel_trade_info['admin_stop_order_id']
-                    admin_limit_order_id = cancel_trade_info['admin_limit_order_id']
-                    client.cancel_order(symbol=str(cancel_trade['pair']), orderId=int(admin_stop_order_id))
-                    client.cancel_order(symbol=str(cancel_trade['pair']), orderId=int(admin_limit_order_id))
-                else:
-                    client.cancel_order(symbol=str(cancel_trade['pair']), orderId=int(cancel_trade["trade_id"]))
-                    
+                client.cancel_order(symbol=str(cancel_trade['pair']), orderId=int(cancel_trade["trade_id"]))
                 get_client_balance = client.get_asset_balance(asset=base_coin)
                 user_balance = float(get_client_balance['free'])
                 users.update_one({"id": user_info['id']}, {"$set": {"trading_balance": user_balance}})

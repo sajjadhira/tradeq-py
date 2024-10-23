@@ -13,8 +13,8 @@ settings = database["settings"]
 settings_data = settings.find_one({"id": 1})
 
 ip = settings_data['ip']
-# base_coin = settings_data['base_coin']
-# pair = settings_data['pair']
+base_coin = settings_data['base_coin']
+pair = settings_data['pair']
 admin_binance_api_key = settings_data['admin_binance_api_key']
 admin_binance_api_secret = settings_data['admin_binance_api_secret']
 if 'last_update_time' in settings_data:
@@ -33,36 +33,34 @@ if last_update_time is None or datetime.now() - last_update_time > timedelta(hou
 client = Client(admin_binance_api_key, admin_binance_api_secret)
 
 # Fetch and store LOT_SIZE filter information
-# exchange_info = client.get_symbol_info(pair)
-# lot_size = [f for f in exchange_info['filters'] if f['filterType'] == 'LOT_SIZE'][0]
+exchange_info = client.get_symbol_info(pair)
+lot_size = [f for f in exchange_info['filters'] if f['filterType'] == 'LOT_SIZE'][0]
 
-# min_qty = float(lot_size['minQty'])
-# max_qty = float(lot_size['maxQty'])
-# step_size = float(lot_size['stepSize'])
-# # get the min notional value
-# # Fetch and store LOT_SIZE filter information if available
-# # Initialize min_notional
-# min_notional = None
+min_qty = float(lot_size['minQty'])
+max_qty = float(lot_size['maxQty'])
+step_size = float(lot_size['stepSize'])
+# get the min notional value
+# Fetch and store LOT_SIZE filter information if available
+# Initialize min_notional
+min_notional = None
 
-# # Check for LOT_SIZE filter
-# lot_size_filter = [f for f in exchange_info['filters'] if f['filterType'] == 'LOT_SIZE']
-# price_filter = [f for f in exchange_info['filters'] if f['filterType'] == 'PRICE_FILTER']
+# Check for LOT_SIZE filter
+lot_size_filter = [f for f in exchange_info['filters'] if f['filterType'] == 'LOT_SIZE']
+price_filter = [f for f in exchange_info['filters'] if f['filterType'] == 'PRICE_FILTER']
 
-# if lot_size_filter and price_filter:
-#     min_qty = float(lot_size_filter[0]['minQty'])
-#     min_price = float(price_filter[0]['minPrice'])
-#     # Approximate min_notional by multiplying min_qty and min_price
-#     min_notional = min_qty * min_price
-#     # print(f"Calculated min_notional for {pair} using LOT_SIZE and PRICE_FILTER: {min_notional}")
-# else:
-#     print(f"MIN_NOTIONAL filter is not available for this symbol {pair}.")
-#     exit()
-
-# settings.update_one({"id": 1}, {"$set": {"min_qty": min_qty, "max_qty": max_qty, "step_size": step_size, "min_notional": min_notional}})
-# 
+if lot_size_filter and price_filter:
+    min_qty = float(lot_size_filter[0]['minQty'])
+    min_price = float(price_filter[0]['minPrice'])
+    # Approximate min_notional by multiplying min_qty and min_price
+    min_notional = min_qty * min_price
+    # print(f"Calculated min_notional for {pair} using LOT_SIZE and PRICE_FILTER: {min_notional}")
+else:
+    print(f"MIN_NOTIONAL filter is not available for this symbol {pair}.")
+    exit()
 
 
-stable_coins = ['USDT', 'USDC', 'FDUSD']
+    
+settings.update_one({"id": 1}, {"$set": {"min_qty": min_qty, "max_qty": max_qty, "step_size": step_size, "min_notional": min_notional}})
 
 # Function to handle incoming WebSocket messages
 def handle_socket_message(msg):
@@ -74,12 +72,7 @@ def handle_socket_message(msg):
         quantity = float(msg['q']) if msg['q'] else None
         side = msg['S']
         type = msg['o']
-        pair = msg['s']
-        
-        for stable_coin in stable_coins:
-            if stable_coin in pair:
-                base_coin = stable_coin
-                break
+        trade_pair = msg['s']
         
         trades = database["trades"]
         find_trade = trades.find_one({"trade_id": trade_id})
@@ -98,66 +91,39 @@ def handle_socket_message(msg):
             stop_price = stop_price if stop_price != 0 else None
             limit_price = limit_price if limit_price != 0 else None
             
-            # Track filled status and detect whether stop or limit leg was filled
-            if status == "FILLED":
-                execution_price = float(msg['L']) if msg['L'] else None  # Last executed price
-                if order_id == stop_order_id:                    
-                    trades.update_many({"admin_stop_order_id": stop_order_id}, {"$set": {"status": "FILLED", "result": "filled_confirmed", "stop_order_status": "FILLED", "filled_price": execution_price}})
-                elif order_id == limit_order_id:
-                    trades.update_many({"limit_order_status": limit_order_id}, {"$set": {"status": "FILLED", "result": "filled", "limit_order_status": "FILLED", "filled_price": execution_price}})
-                else:
-                    print(f"Order filled at price: {execution_price}")
-                    
-            elif status == "CANCELED":
-                if order_id == stop_order_id:
-                    trades.update_many({"admin_stop_order_id": stop_order_id}, {"$set": {"status": "CANCELED", "result": "canceled", "stop_order_status": "CANCELED"}})
-                elif order_id == limit_order_id:
-                    trades.update_many({"limit_order_status": limit_order_id}, {"$set": {"status": "CANCELED", "result": "canceled", "limit_order_status": "CANCELED"}})
-                else:
-                    print(f"Order canceled: {trade_id}")
-                    
-            elif status == "REJECTED":
-                if order_id == stop_order_id:
-                    trades.update_many({"admin_stop_order_id": stop_order_id}, {"$set": {"status": "CANCELED", "result": "canceled", "stop_order_status": "canceled"}})
-                elif order_id == limit_order_id:
-                    trades.update_many({"limit_order_status": limit_order_id}, {"$set": {"status": "CANCELED", "result": "canceled", "limit_order_status": "canceled"}})
-                else:
-                    print(f"Order rejected: {trade_id}")
-                    
-            elif status == "NEW":
-                # Fetch balance for the base asset (assumes client and base_coin are set up)
-                balance = client.get_asset_balance(asset=base_coin)
-                amount_usd = float(price) * float(quantity)
-                amount_with_this_trade = float(balance['free']) + amount_usd
-                percent = (amount_usd * 100) / amount_with_this_trade
-                
-                # Create a new data entry for the trade in the database
-                data = {
-                    "trade_id": trade_id,
-                    "admin_trade_id": trade_id,
-                    "status": "NEW",
-                    "pair": pair,
-                    "price": price,
-                    "quantity": quantity,
-                    "percent": percent,
-                    "role": "admin",
-                    "side": side,
-                    "type": type,
-                    "result": "pending",
-                    "stop_price": stop_price,
-                    "limit_price": limit_price,
-                    "stop_order_id": stop_order_id,
-                    "limit_order_id": limit_order_id,
-                    "order_id": order_id,
-                    "stop_order_status": "NEW",
-                    "limit_order_status": "NEW",
-                    "user_id": 1,
-                    "user_name": "Admin",
-                    "created_at": date_time,
-                }
-                
-                # Insert trade record into the 'trades' collection
-                trades.insert_one(data)
+            # Fetch balance for the base asset (assumes client and base_coin are set up)
+            balance = client.get_asset_balance(asset=base_coin)
+            amount_usd = float(price) * float(quantity)
+            amount_with_this_trade = float(balance['free']) + amount_usd
+            percent = (amount_usd * 100) / amount_with_this_trade
+            
+            # Create a new data entry for the trade in the database
+            data = {
+                "trade_id": trade_id,
+                "admin_trade_id": trade_id,
+                "status": "NEW",
+                "pair": trade_pair,
+                "price": price,
+                "quantity": quantity,
+                "percent": percent,
+                "role": "admin",
+                "side": side,
+                "type": type,
+                "result": "pending",
+                "stop_price": stop_price,
+                "limit_price": limit_price,
+                "stop_order_id": stop_order_id,
+                "limit_order_id": limit_order_id,
+                "order_id": order_id,
+                "stop_order_status": "NEW",
+                "limit_order_status": "NEW",
+                "user_id": 1,
+                "user_name": "Admin",
+                "created_at": date_time,
+            }
+            
+            # Insert trade record into the 'trades' collection
+            trades.insert_one(data)
         # do stuff with the market order
         elif type == "MARKET" and find_trade is None:
             balance = client.get_asset_balance(asset=base_coin)
