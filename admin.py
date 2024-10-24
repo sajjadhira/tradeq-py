@@ -29,40 +29,8 @@ if last_update_time is None or datetime.now() - last_update_time > timedelta(hou
     ip = data['ip']
     settings.update_one({"id": 1}, {"$set": {"ip": ip, "last_update_time": datetime.now()}})
 
-# Initialize the Binance client
-client = Client(admin_binance_api_key, admin_binance_api_secret)
 
-# Fetch and store LOT_SIZE filter information
-# exchange_info = client.get_symbol_info(pair)
-# lot_size = [f for f in exchange_info['filters'] if f['filterType'] == 'LOT_SIZE'][0]
-
-# min_qty = float(lot_size['minQty'])
-# max_qty = float(lot_size['maxQty'])
-# step_size = float(lot_size['stepSize'])
-# # get the min notional value
-# # Fetch and store LOT_SIZE filter information if available
-# # Initialize min_notional
-# min_notional = None
-
-# # Check for LOT_SIZE filter
-# lot_size_filter = [f for f in exchange_info['filters'] if f['filterType'] == 'LOT_SIZE']
-# price_filter = [f for f in exchange_info['filters'] if f['filterType'] == 'PRICE_FILTER']
-
-# if lot_size_filter and price_filter:
-#     min_qty = float(lot_size_filter[0]['minQty'])
-#     min_price = float(price_filter[0]['minPrice'])
-#     # Approximate min_notional by multiplying min_qty and min_price
-#     min_notional = min_qty * min_price
-#     # print(f"Calculated min_notional for {pair} using LOT_SIZE and PRICE_FILTER: {min_notional}")
-# else:
-#     print(f"MIN_NOTIONAL filter is not available for this symbol {pair}.")
-#     exit()
-
-# settings.update_one({"id": 1}, {"$set": {"min_qty": min_qty, "max_qty": max_qty, "step_size": step_size, "min_notional": min_notional}})
-# 
-
-
-stable_coins = ['USDT', 'USDC', 'FDUSD']
+stable_coins = ['USDT', 'FDUSD']
 
 # Function to handle incoming WebSocket messages
 def handle_socket_message(msg):
@@ -76,14 +44,90 @@ def handle_socket_message(msg):
         type = msg['o']
         pair = msg['s']
         
-        for stable_coin in stable_coins:
-            if stable_coin in pair:
-                base_coin = stable_coin
-                break
+        base_coin = next((stable_coin for stable_coin in stable_coins if stable_coin in pair), None)
         
         trades = database["trades"]
         find_trade = trades.find_one({"trade_id": trade_id})
+       
+     
+        # Handle TRAILING_STOP_LIMIT orders
+        if type == "TRAILING_STOP_LIMIT" and find_trade is None:
+            # Calculate user balance and percent
+            balance = client.get_asset_balance(asset=base_coin)
+            amount_usd = float(price) * float(quantity)
+            amount_with_this_trade = float(balance['free']) + amount_usd
+            percent = (amount_usd * 100) / amount_with_this_trade
+            
+            # Extract trailing limit specifics (callback rate, stop price, and limit price)
+            callback_rate = float(msg.get('AP', 0))  # Callback rate percentage (trailing percent)
+            stop_price = float(msg.get('P', 0))  # Stop price for the trailing limit order
+            limit_price = float(msg.get('L', 0))  # Limit price to place order after trigger
+            
+  
+            # Handle TRADE FILLED or PARTIALLY FILLED
+            if find_trade and status in ['FILLED', 'PARTIALLY_FILLED']:
+                trades.update_many(
+                    {"admin_trade_id": trade_id},
+                    {
+                        "$set": {
+                            "status": "FILLED",
+                            "result": "success",
+                            "filled_at": date_time
+                        }
+                    }
+                )
+                print(f"Trade {trade_id} filled: {quantity} {pair} at {price}")
 
+            # Handle TRADE CANCELLED
+            elif find_trade and status == 'CANCELED':
+                trades.update_many(
+                    {"admin_trade_id": trade_id},
+                    {
+                        "$set": {
+                            "status": "CANCELLED",
+                            "result": "cancelled",
+                            "cancelled_at": date_time
+                        }
+                    }
+                )
+                print(f"Trade {trade_id} cancelled")
+                
+            elif find_trade and status == 'REJECTED':
+                trades.update_many(
+                    {"admin_trade_id": trade_id},
+                    {
+                        "$set": {
+                            "status": "CANCELLED",
+                            "result": "cancelled",
+                            "rejected_at": date_time
+                        }
+                    }
+                )
+                print(f"Trade {trade_id} rejected")
+                
+            elif status == "NEW":
+                # Insert the new trade record into the database
+                data = {
+                    "trade_id": trade_id,
+                    "admin_trade_id": trade_id,
+                    "status": "NEW",
+                    "pair": pair,
+                    "price": price,
+                    "quantity": quantity,
+                    "percent": percent,
+                    "role": "admin",
+                    "side": side,
+                    "type": type,
+                    "callback_rate": callback_rate,  # Trailing stop callback rate
+                    "stop_price": stop_price,  # Stop price if available
+                    "limit_price": limit_price,  # Limit price for limit order
+                    "result": "pending",
+                    "user_id": 1,
+                    "user_name": "Admin",
+                    "created_at": date_time,
+                }
+                trades.insert_one(data)
+                print(f"{status} {type} {side}: {trade_id} # {pair} at {price} with trailing stop of {callback_rate}% and stop price {stop_price}, limit price {limit_price}")
         # do stuff with the OCO order
         if type == "OCO" and find_trade is None:
            
@@ -102,9 +146,9 @@ def handle_socket_message(msg):
             if status == "FILLED":
                 execution_price = float(msg['L']) if msg['L'] else None  # Last executed price
                 if order_id == stop_order_id:                    
-                    trades.update_many({"admin_stop_order_id": stop_order_id}, {"$set": {"status": "FILLED", "result": "filled_confirmed", "stop_order_status": "FILLED", "filled_price": execution_price}})
+                    trades.update_many({"admin_stop_order_id": stop_order_id}, {"$set": {"status": "FILLED", "result": "filled_confirmed", "stop_order_status": "FILLED", "price": execution_price}})
                 elif order_id == limit_order_id:
-                    trades.update_many({"limit_order_status": limit_order_id}, {"$set": {"status": "FILLED", "result": "filled", "limit_order_status": "FILLED", "filled_price": execution_price}})
+                    trades.update_many({"limit_order_status": limit_order_id}, {"$set": {"status": "FILLED", "result": "filled", "limit_order_status": "FILLED", "price": execution_price}})
                 else:
                     print(f"Order filled at price: {execution_price}")
                     
@@ -114,6 +158,7 @@ def handle_socket_message(msg):
                 elif order_id == limit_order_id:
                     trades.update_many({"limit_order_status": limit_order_id}, {"$set": {"status": "CANCELED", "result": "canceled", "limit_order_status": "CANCELED"}})
                 else:
+                    trades.update_many({"admin_trade_id": trade_id}, {"$set": {"status": "CANCELED", "result": "canceled"}})
                     print(f"Order canceled: {trade_id}")
                     
             elif status == "REJECTED":

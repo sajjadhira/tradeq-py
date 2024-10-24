@@ -11,12 +11,11 @@ client = MongoClient('mongodb+srv://next:N5QW2JOkbXyu9QCN@pybi.q2us1py.mongodb.n
 
 database = client["btrader"]
 settings = database["settings"]
+pairs = database["pairs"]
 
 settings_data = settings.find_one({"id": 1})
 
 ip = settings_data['ip']
-base_coin =  settings_data['base_coin']
-pair = settings_data['pair']
 
 # commission parcentage
 default_affiliate_commission = float(settings_data['default_affiliate_commission'])
@@ -27,9 +26,7 @@ superadmin_revenue_percent = float(settings_data['superadmin_revenue_percent'])
 default_fee = float(settings_data['default_fee'])
 
 
-min_qty = float(settings_data['min_qty'])
-max_qty = float(settings_data['max_qty'])
-step_size = float(settings_data['step_size'])
+stable_coins = ['USDT', 'FDUSD']
 
 while True:
     try:
@@ -42,15 +39,17 @@ while True:
         # find last trade by admin
         
         ############################################
-        # DO FUNCTIONALITY FOR ADMIN OCO TRADES    #
+        # DO FUNCTIONALITY FOR TRAILING_STOP_LIMIT #
         ############################################
         
-        find_oco_trade = trades.find_one({"role": "admin", "result": "pending", "status": "NEW","type" : "OCO"}, sort=[("created_at", -1)])
-        if find_oco_trade is not None:
-            admin_trade_id = find_oco_trade['admin_trade_id']
-            percent = float(find_oco_trade['percent'])
-            admin_price = float(find_oco_trade['price'])
-            stop_price = float(find_oco_trade['stop_price'])
+        
+        find_trailing_stop_limit_trade = trades.find_one({"role": "admin", "result": "pending", "status": "NEW","type" : "TRAILING_STOP_LIMIT"}, sort=[("created_at", -1)])
+        if find_trailing_stop_limit_trade is not None:
+            admin_trade_id = find_trailing_stop_limit_trade['admin_trade_id']
+            percent = float(find_trailing_stop_limit_trade['percent'])
+            admin_price = float(find_trailing_stop_limit_trade['price'])
+            stop_price = float(find_trailing_stop_limit_trade['stop_price'])
+            stop_limit_price = float(find_trailing_stop_limit_trade['stop_limit_price'])
             
             #  find active users and insert trade
             # all_users = users.find({"role": "user", "status": 1})
@@ -64,6 +63,12 @@ while True:
                         
                     api_key = user.get("binance_api_key", "")
                     api_secret = user.get("binance_api_secret", "")
+                    pair = find_trailing_stop_limit_trade['pair']
+                    
+                    for stable_coin in stable_coins:
+                        if stable_coin in pair:
+                            base_coin = stable_coin
+                            break
                     
                     user_fuel = float(user.get("fuel", 0))
                     sale_trade_id  = 0
@@ -84,6 +89,289 @@ while True:
                     
                     try:
                         client = Client(api_key, api_secret)
+                        
+
+                        find_pair = pairs.find_one({"pair": pair})
+                        if find_pair is None:
+                            # Fetch and store LOT_SIZE filter information
+                            exchange_info = client.get_symbol_info(pair)
+                            lot_size = [f for f in exchange_info['filters'] if f['filterType'] == 'LOT_SIZE'][0]
+
+                            min_qty = float(lot_size['minQty'])
+                            max_qty = float(lot_size['maxQty'])
+                            step_size = float(lot_size['stepSize'])
+                            # get the min notional value
+                            # Fetch and store LOT_SIZE filter information if available
+                            # Initialize min_notional
+                            min_notional = None
+
+                            # Check for LOT_SIZE filter
+                            lot_size_filter = [f for f in exchange_info['filters'] if f['filterType'] == 'LOT_SIZE']
+                            price_filter = [f for f in exchange_info['filters'] if f['filterType'] == 'PRICE_FILTER']
+
+                            if lot_size_filter and price_filter:
+                                min_qty = float(lot_size_filter[0]['minQty'])
+                                min_price = float(price_filter[0]['minPrice'])
+                                # Approximate min_notional by multiplying min_qty and min_price
+                                min_notional = min_qty * min_price
+                                # print(f"Calculated min_notional for {pair} using LOT_SIZE and PRICE_FILTER: {min_notional}")
+                            else:
+                                print(f"MIN_NOTIONAL filter is not available for this symbol {pair}.")
+                                exit()
+                            pair_data = {
+                                "pair": pair,
+                                "min_qty": min_qty,
+                                "max_qty": max_qty,
+                                "step_size": step_size,
+                                "min_notional": min_notional
+                            }
+                            pairs.insert_one(pair_data)
+                        else:
+                            min_qty = float(find_pair['min_qty'])
+                            max_qty = float(find_pair['max_qty'])
+                            step_size = float(find_pair['step_size'])
+                            min_notional = float(find_pair['min_notional'])
+                        
+                        if find_trailing_stop_limit_trade['side'] == "BUY":
+                        
+                            print(f"{find_trailing_stop_limit_trade['side']} trade for user {user['name']}")
+                        # check user last trade if last trade side is buy then ignore this trade
+                            last_trade = trades.find_one({"pair": find_trailing_stop_limit_trade['pair'], "user_id": user['id'], "side": "BUY", "result": "pending"}, sort=[("created_at", -1)])
+                            
+                            if last_trade is not None:
+                                continue
+                            
+                            
+                        # get user balance
+                            user_balance = client.get_asset_balance(asset=base_coin)
+                            # split balance
+                            balance = float(user_balance['free'])
+                            # balance parcent
+                            percent_balance = balance * percent / 100
+                            asset_quantity = percent_balance / admin_price
+                            # quantity = "{:0.0{}f}".format(asset_quantity, price_precision)
+                            quantity = max(min_qty, min(max_qty, (asset_quantity // step_size) * step_size))
+                            quantity = round_step_size(quantity, step_size)
+                            
+                            if balance < 10:
+                                # trace = traceback.print_exc()
+                                print(f"User {user['name']} has insufficient balance to buy {quantity} {find_trailing_stop_limit_trade['pair']} current free {base_coin} balance {balance}")
+                                users.update_one({"id": user['id']}, {"$set": {"message": f"You have insufficient balance to buy {quantity} {find_trailing_stop_limit_trade['pair']}. Your current free {base_coin} balance is ${balance}"}})
+                                continue
+                            
+                        elif find_trailing_stop_limit_trade['side'] == "SELL":
+                                
+                                print(f"{find_trailing_stop_limit_trade['side']} trade for user {user['name']}")
+                                
+                                # check user last trade if last trade side is sell then ignore this trade
+                                last_trade = trades.find_one({"pair": find_trailing_stop_limit_trade['pair'], "user_id": user['id'], "side": "SELL", "result": "pending"}, sort=[("created_at", -1)])
+                                if last_trade is not None:
+                                    continue
+                                
+                                last_buy_order_for_this_pair_and_user = trades.find_one({"pair": find_trailing_stop_limit_trade['pair'], "user_id": user['id'], "side": "BUY", "result": "filled_confirmed"}, sort=[("created_at", -1)])
+                                if last_buy_order_for_this_pair_and_user is None:
+                                    # trace = traceback.print_exc()
+                                    print(f"Last buy order not found for user {user['name']}")
+                                    continue
+                                
+                                if 'sold' not in last_buy_order_for_this_pair_and_user:
+                                    # trace = traceback.print_exc()
+                                    print(f"Sold record not found for user {user['name']}")
+                                    continue
+                                
+                                if last_buy_order_for_this_pair_and_user['sold'] == 1:
+                                    # trace = traceback.print_exc()
+                                    print(f"Last buy order already sold for user {user['name']}")
+                                    continue
+                                
+                                quantity = float(last_buy_order_for_this_pair_and_user['quantity'])
+                                quantity = round_step_size(quantity, step_size)
+                                
+                                # first check if user has enough quantity to sell
+                                onlyasset = find_trailing_stop_limit_trade['pair'].replace(base_coin, "")
+                                user_balance_for_current_asset = client.get_asset_balance(asset=onlyasset)
+                                available_asset_balance = float(user_balance_for_current_asset['free'])
+                                
+                                if quantity > available_asset_balance:
+                                    # trace = traceback.print_exc()
+                                    print(f"User {user['name']} has insufficient balance to sell {quantity} {find_trailing_stop_limit_trade['pair']}")
+                                    users.update_one({"id": user['id']}, {"$set": {"message": f"You have sold {find_trailing_stop_limit_trade['pair']} manually and we cannot sell {quantity}, so your trade is marked as close from our end automatically."}})
+                                    trades.update_one({"trade_id": last_buy_order_for_this_pair_and_user['trade_id']}, {"$set": {"status": "MANUALLY CLOSED","result": "filled_confirmed"}})
+                                    continue
+                                
+                        else:
+                            continue
+                        
+                        order = client.create_order(symbol=find_trailing_stop_limit_trade['pair'], side=find_trailing_stop_limit_trade['side'], type=find_trailing_stop_limit_trade['type'], quantity=quantity, price=admin_price, stopPrice=stop_price, stopLimitPrice=stop_limit_price, stopLimitTimeInForce="GTC")
+                        order_id = order['orderId']
+                        order_status = order['status']
+                        # asset_quantity = 115
+                        
+                        if 'admin_id' in user and user['admin_id'] > 0:
+                            admin_id = user['admin_id']
+                        else:
+                            admin_id = 0
+                            
+                        if 'affiliate_id' in user and user['affiliate_id'] > 0:
+                            affiliate_id = user['affiliate_id']
+                            
+                        else:
+                            affiliate_id = 0
+                            
+                        if find_trade['side'] == "SELL":
+                            result = "filled"
+                            status = "FILLED"
+                        elif find_trade['side'] == "BUY":
+                            result = "filled_confirmed"
+                            status = "FILLED"
+                            
+                        
+                        # add created_at to order with Y-m-=d H:i:s format
+                        created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        
+                        data = {
+                            "trade_id": order_id,
+                            "admin_trade_id": admin_trade_id,
+                            "status": status,
+                            "pair": find_trailing_stop_limit_trade['pair'],
+                            "price": find_trailing_stop_limit_trade['price'],
+                            "quantity": quantity,
+                            "role": "user",
+                            "side": find_trailing_stop_limit_trade['side'],
+                            "type": find_trailing_stop_limit_trade['type'],
+                            "result" : result,
+                            "user_id": user['id'],
+                            "user_name": user['name'],
+                            "admin_id" : admin_id,
+                            "affiliated_by" : affiliate_id,
+                            "profit": 0,
+                            "fee": 0,
+                            "sold" : 0,
+                            "created_at": created_at,
+                            "updated_at": created_at
+                        }
+                        
+                        trades.insert_one(data)
+                        
+                        print(f"Trade opened {order_id} for user {user['name']}")
+                        
+                        # update user balance
+                        get_client_balance = client.get_asset_balance(asset=base_coin)
+                        
+                        user_balance = float(get_client_balance['free'])
+                        users.update_one({"id": user['id']}, {"$set": {"trading_balance": user_balance}})
+                        
+                        
+                    except Exception as e:
+                        # update user with a log
+                        trace = traceback.print_exc()
+                        print(trace)
+                        message = f"{str(e)} for user {user['name']}"
+                        users.update_one({"id": user['id']}, {"$set": {"message": message}})
+                        
+                        if "API-key format invalid" in str(e):
+                            users.update_one({"id": user['id']}, {"$set": {"status": 0}})
+                            
+                        print(trace)
+                        continue
+                    
+            # update admin trade status to FILLED
+            trades.update_one({"admin_trade_id": admin_trade_id}, {"$set": {"result": "filled", "status": "FILLED"}})
+        
+        ############################################
+        # DO FUNCTIONALITY FOR ADMIN OCO TRADES    #
+        ############################################
+        
+        find_oco_trade = trades.find_one({"role": "admin", "result": "pending", "status": "NEW","type" : "OCO"}, sort=[("created_at", -1)])
+        if find_oco_trade is not None:
+            admin_trade_id = find_oco_trade['admin_trade_id']
+            percent = float(find_oco_trade['percent'])
+            admin_price = float(find_oco_trade['price'])
+            stop_price = float(find_oco_trade['stop_price'])
+            
+
+            
+            #  find active users and insert trade
+            # all_users = users.find({"role": "user", "status": 1})
+            # all users by role and status 1 or "1"
+            all_users = users.find({"role": "user", "status": {"$in": [1, "1"]}})
+            
+            for user in all_users:
+                
+                find_existing_trade = trades.find_one({"admin_trade_id": admin_trade_id, "user_id": user['id']})
+                if find_existing_trade is None:
+                        
+                    api_key = user.get("binance_api_key", "")
+                    api_secret = user.get("binance_api_secret", "")
+                    
+                    pair = find_oco_trade['pair']
+                    for stable_coin in stable_coins:
+                        if stable_coin in pair:
+                            base_coin = stable_coin
+                            break
+                    
+                    user_fuel = float(user.get("fuel", 0))
+                    sale_trade_id  = 0
+                        
+                    if api_key == "" or api_secret == "":
+                        # set user message
+                        # trace = traceback.print_exc()
+                        message = f"Binance API key and secret not found for {user['name']}. Trace: Line 86"
+                        users.update_one({"id": user['id']}, {"$set": {"message": message}})
+                        continue
+                    
+                    if user_fuel < 1:
+                        # update user with a log
+                        # trace = traceback.print_exc()
+                        message = f"Insufficient fuel, cant take trade, please reload fuel balance."
+                        users.update_one({"id": user['id']}, {"$set": {"message": message}})
+                        continue
+                    
+                    try:
+                        client = Client(api_key, api_secret)
+                        
+
+                        find_pair = pairs.find_one({"pair": pair})
+                        if find_pair is None:
+                            # Fetch and store LOT_SIZE filter information
+                            exchange_info = client.get_symbol_info(pair)
+                            lot_size = [f for f in exchange_info['filters'] if f['filterType'] == 'LOT_SIZE'][0]
+
+                            min_qty = float(lot_size['minQty'])
+                            max_qty = float(lot_size['maxQty'])
+                            step_size = float(lot_size['stepSize'])
+                            # get the min notional value
+                            # Fetch and store LOT_SIZE filter information if available
+                            # Initialize min_notional
+                            min_notional = None
+
+                            # Check for LOT_SIZE filter
+                            lot_size_filter = [f for f in exchange_info['filters'] if f['filterType'] == 'LOT_SIZE']
+                            price_filter = [f for f in exchange_info['filters'] if f['filterType'] == 'PRICE_FILTER']
+
+                            if lot_size_filter and price_filter:
+                                min_qty = float(lot_size_filter[0]['minQty'])
+                                min_price = float(price_filter[0]['minPrice'])
+                                # Approximate min_notional by multiplying min_qty and min_price
+                                min_notional = min_qty * min_price
+                                # print(f"Calculated min_notional for {pair} using LOT_SIZE and PRICE_FILTER: {min_notional}")
+                            else:
+                                print(f"MIN_NOTIONAL filter is not available for this symbol {pair}.")
+                                exit()
+                            pair_data = {
+                                "pair": pair,
+                                "min_qty": min_qty,
+                                "max_qty": max_qty,
+                                "step_size": step_size,
+                                "min_notional": min_notional
+                            }
+                            pairs.insert_one(pair_data)
+                        else:
+                            min_qty = float(find_pair['min_qty'])
+                            max_qty = float(find_pair['max_qty'])
+                            step_size = float(find_pair['step_size'])
+                            min_notional = float(find_pair['min_notional'])
+
                         
                         if find_oco_trade['side'] == "BUY":
                         
@@ -245,6 +533,12 @@ while True:
                         
                     api_key = user.get("binance_api_key", "")
                     api_secret = user.get("binance_api_secret", "")
+                    pair = find_market_trade['pair']
+                    
+                    for stable_coin in stable_coins:
+                        if stable_coin in pair:
+                            base_coin = stable_coin
+                            break
                     
                     user_fuel = float(user.get("fuel", 0))
                     sale_trade_id  = 0
@@ -265,6 +559,48 @@ while True:
                     
                     try:
                         client = Client(api_key, api_secret)
+                        
+
+                        find_pair = pairs.find_one({"pair": pair})
+                        if find_pair is None:
+                            # Fetch and store LOT_SIZE filter information
+                            exchange_info = client.get_symbol_info(pair)
+                            lot_size = [f for f in exchange_info['filters'] if f['filterType'] == 'LOT_SIZE'][0]
+
+                            min_qty = float(lot_size['minQty'])
+                            max_qty = float(lot_size['maxQty'])
+                            step_size = float(lot_size['stepSize'])
+                            # get the min notional value
+                            # Fetch and store LOT_SIZE filter information if available
+                            # Initialize min_notional
+                            min_notional = None
+
+                            # Check for LOT_SIZE filter
+                            lot_size_filter = [f for f in exchange_info['filters'] if f['filterType'] == 'LOT_SIZE']
+                            price_filter = [f for f in exchange_info['filters'] if f['filterType'] == 'PRICE_FILTER']
+
+                            if lot_size_filter and price_filter:
+                                min_qty = float(lot_size_filter[0]['minQty'])
+                                min_price = float(price_filter[0]['minPrice'])
+                                # Approximate min_notional by multiplying min_qty and min_price
+                                min_notional = min_qty * min_price
+                                # print(f"Calculated min_notional for {pair} using LOT_SIZE and PRICE_FILTER: {min_notional}")
+                            else:
+                                print(f"MIN_NOTIONAL filter is not available for this symbol {pair}.")
+                                exit()
+                            pair_data = {
+                                "pair": pair,
+                                "min_qty": min_qty,
+                                "max_qty": max_qty,
+                                "step_size": step_size,
+                                "min_notional": min_notional
+                            }
+                            pairs.insert_one(pair_data)
+                        else:
+                            min_qty = float(find_pair['min_qty'])
+                            max_qty = float(find_pair['max_qty'])
+                            step_size = float(find_pair['step_size'])
+                            min_notional = float(find_pair['min_notional'])
                         
                         if find_market_trade['side'] == "BUY":
                         
@@ -432,6 +768,12 @@ while True:
                     api_key = user.get("binance_api_key", "")
                     api_secret = user.get("binance_api_secret", "")
                     
+                    pair = find_existing_trade['pair']
+                    for stable_coin in stable_coins:
+                        if stable_coin in pair:
+                            base_coin = stable_coin
+                            break
+                    
                     user_fuel = float(user.get("fuel", 0))
                     sale_trade_id  = 0
                         
@@ -451,6 +793,48 @@ while True:
                     
                     try:
                         client = Client(api_key, api_secret)
+                        
+
+                        find_pair = pairs.find_one({"pair": pair})
+                        if find_pair is None:
+                            # Fetch and store LOT_SIZE filter information
+                            exchange_info = client.get_symbol_info(pair)
+                            lot_size = [f for f in exchange_info['filters'] if f['filterType'] == 'LOT_SIZE'][0]
+
+                            min_qty = float(lot_size['minQty'])
+                            max_qty = float(lot_size['maxQty'])
+                            step_size = float(lot_size['stepSize'])
+                            # get the min notional value
+                            # Fetch and store LOT_SIZE filter information if available
+                            # Initialize min_notional
+                            min_notional = None
+
+                            # Check for LOT_SIZE filter
+                            lot_size_filter = [f for f in exchange_info['filters'] if f['filterType'] == 'LOT_SIZE']
+                            price_filter = [f for f in exchange_info['filters'] if f['filterType'] == 'PRICE_FILTER']
+
+                            if lot_size_filter and price_filter:
+                                min_qty = float(lot_size_filter[0]['minQty'])
+                                min_price = float(price_filter[0]['minPrice'])
+                                # Approximate min_notional by multiplying min_qty and min_price
+                                min_notional = min_qty * min_price
+                                # print(f"Calculated min_notional for {pair} using LOT_SIZE and PRICE_FILTER: {min_notional}")
+                            else:
+                                print(f"MIN_NOTIONAL filter is not available for this symbol {pair}.")
+                                exit()
+                            pair_data = {
+                                "pair": pair,
+                                "min_qty": min_qty,
+                                "max_qty": max_qty,
+                                "step_size": step_size,
+                                "min_notional": min_notional
+                            }
+                            pairs.insert_one(pair_data)
+                        else:
+                            min_qty = float(find_pair['min_qty'])
+                            max_qty = float(find_pair['max_qty'])
+                            step_size = float(find_pair['step_size'])
+                            min_notional = float(find_pair['min_notional'])
                         
                         if find_trade['side'] == "BUY":
                         
