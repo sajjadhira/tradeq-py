@@ -481,6 +481,11 @@ while True:
                             "admin_stop_order_id": find_oco_trade['stop_order_id'],  # Store admin stop order ID
                             "stop_order_status": "NEW",
                             "limit_order_status": "NEW",
+                            "admin_id" : admin_id,
+                            "affiliated_by" : affiliate_id,
+                            "profit": 0,
+                            "fee": 0,
+                            "sold" : 0,
                             "created_at": created_at,
                             "updated_at": created_at
                         }
@@ -1000,7 +1005,7 @@ while True:
                 client = Client(api_key, api_secret)
                 # order = client.create_order(symbol=filled_trade['pair'], side=filled_trade['side'], type=filled_trade['type'], quantity=sale_quantity, price=filled_trade['price'], timeInForce="GTC")
                 
-                last_buy_order_for_this_pair_and_user = trades.find_one({"pair": filled_trade['pair'], "user_id": filled_trade['user_id'], "side": "BUY", "result": "filled_confirmed","type" : filled_trade['type']}, sort=[("created_at", -1)])
+                last_buy_order_for_this_pair_and_user = trades.find_one({"pair": filled_trade['pair'], "user_id": filled_trade['user_id'], "side": "BUY", "result": "filled_confirmed"}, sort=[("created_at", -1)])
                 
                 if last_buy_order_for_this_pair_and_user is not None and filled_trade['side'] == "SELL":
 

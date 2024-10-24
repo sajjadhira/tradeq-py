@@ -44,6 +44,7 @@ def handle_socket_message(msg):
         type = msg['o']
         pair = msg['s']
         
+        
         base_coin = next((stable_coin for stable_coin in stable_coins if stable_coin in pair), None)
         
         trades = database["trades"]
@@ -66,13 +67,18 @@ def handle_socket_message(msg):
   
             # Handle TRADE FILLED or PARTIALLY FILLED
             if find_trade and status in ['FILLED', 'PARTIALLY_FILLED']:
+                
+                # get the closed price
+                closed_price = float(msg['L']) if msg['L'] else 0
+                
                 trades.update_many(
                     {"admin_trade_id": trade_id},
                     {
                         "$set": {
                             "status": "FILLED",
-                            "result": "success",
-                            "filled_at": date_time
+                            "result": "filled",
+                            "price": closed_price,
+                            "updated_at": date_time
                         }
                     }
                 )
@@ -86,7 +92,7 @@ def handle_socket_message(msg):
                         "$set": {
                             "status": "CANCELLED",
                             "result": "cancelled",
-                            "cancelled_at": date_time
+                            "updated_at": date_time
                         }
                     }
                 )
@@ -99,7 +105,7 @@ def handle_socket_message(msg):
                         "$set": {
                             "status": "CANCELLED",
                             "result": "cancelled",
-                            "rejected_at": date_time
+                            "updated_at": date_time
                         }
                     }
                 )
@@ -144,12 +150,13 @@ def handle_socket_message(msg):
             
             # Track filled status and detect whether stop or limit leg was filled
             if status == "FILLED":
-                execution_price = float(msg['L']) if msg['L'] else None  # Last executed price
+                execution_price = float(msg['L']) if msg['L'] else 0  # Last executed price
                 if order_id == stop_order_id:                    
                     trades.update_many({"admin_stop_order_id": stop_order_id}, {"$set": {"status": "FILLED", "result": "filled_confirmed", "stop_order_status": "FILLED", "price": execution_price}})
                 elif order_id == limit_order_id:
                     trades.update_many({"limit_order_status": limit_order_id}, {"$set": {"status": "FILLED", "result": "filled", "limit_order_status": "FILLED", "price": execution_price}})
                 else:
+                    trades.update_many({"admin_trade_id": trade_id}, {"$set": {"status": "FILLED", "result": "filled"}})
                     print(f"Order filled at price: {execution_price}")
                     
             elif status == "CANCELED":
@@ -167,6 +174,7 @@ def handle_socket_message(msg):
                 elif order_id == limit_order_id:
                     trades.update_many({"limit_order_status": limit_order_id}, {"$set": {"status": "CANCELED", "result": "canceled", "limit_order_status": "canceled"}})
                 else:
+                    trades.update_many({"admin_trade_id": trade_id}, {"$set": {"status": "CANCELED", "result": "canceled"}})
                     print(f"Order rejected: {trade_id}")
                     
             elif status == "NEW":
@@ -177,6 +185,8 @@ def handle_socket_message(msg):
                 percent = (amount_usd * 100) / amount_with_this_trade
                 
                 # Create a new data entry for the trade in the database
+   
+                
                 data = {
                     "trade_id": trade_id,
                     "admin_trade_id": trade_id,
